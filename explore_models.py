@@ -5,18 +5,22 @@
   Usage: python explore_models.py
   (Formatted with '# %%' cell markers for VS Code / IDE Interactive Notebook)
 ================================================================================
-This script inspects, loads, explains, and demonstrates all model artifacts in
+This script inspects, loads, explains, and demonstrates all updated model artifacts in
 the 'ml_service/models/' directory:
-  1. feature_names.joblib         - 74 input feature names & categories
-  2. scaler.joblib               - StandardScaler parameters (means & variances)
-  3. regressor_xgb.joblib        - XGBoost RUL Regressor model
-  4. classifier_xgb.joblib       - XGBoost 30-Cycle Failure Risk Classifier
-  5. meridian_rul_model_bundle.joblib - Unified bundle containing models + scaler
-  6. rul_model.pkl               - Pickle format RUL regressor
-  7. metrics.json                - Official test evaluation benchmarks
-  8. feature_importance.json     - Telemetry feature importance ranking
-  9. fleet_predictions.json      - 100-engine fleet precomputed diagnoses
-  10. summary_stats.json         - Fleet-level risk tier distribution
+  1. xgb_regressor_FD001.joblib    - Primary XGBoost RUL Regressor (78 features, R²=0.9093)
+  2. rf_regressor_FD001.joblib     - Alternative Random Forest Regressor (100 trees, R²=0.8952)
+  3. xgb_regressor_FD003.joblib    - XGBoost Regressor for Dual Failure Modes (HPC + Fan)
+  4. rf_regressor_FD003.joblib     - Random Forest for Dual Failure Modes
+  5. lstm_regressor_FD002.pt       - PyTorch Sequential LSTM for 6 Operating Regimes
+  6. cnn_lstm_regressor_FD002.pt   - PyTorch 1D CNN-LSTM Hybrid Regressor
+  7. lstm_regressor_FD004.pt       - PyTorch LSTM for 6 Regimes & Dual Failure Modes
+  8. cnn_lstm_regressor_FD004.pt   - PyTorch CNN-LSTM Hybrid for Complex Dynamics
+  9. metadata_FD001.json           - Feature mapping and single-condition configuration
+  10. all_subsets_benchmark_summary.json - Multi-subset comparative benchmarks
+  11. metrics.json                 - Official held-out test evaluation benchmarks
+  12. feature_importance.json      - 78-feature importance ranking
+  13. fleet_predictions.json       - 100-engine fleet precomputed diagnoses
+  14. summary_stats.json           - Fleet-level risk tier distribution
 """
 
 # %% [markdown]
@@ -25,7 +29,6 @@ the 'ml_service/models/' directory:
 import os
 import sys
 import json
-import pickle
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -41,9 +44,8 @@ if hasattr(sys.stdout, 'reconfigure'):
 # Locate models directory
 BASE_DIR = Path(__file__).resolve().parent
 MODELS_DIR = BASE_DIR / "ml_service" / "models"
-if not MODELS_DIR.exists():
-    # Fallback to direct path
-    MODELS_DIR = Path(r"C:\Users\HP\Downloads\archive\models")
+if not MODELS_DIR.exists() or not (MODELS_DIR / "xgb_regressor_FD001.joblib").exists():
+    MODELS_DIR = BASE_DIR / "Updated_Models"
 
 print("=" * 75)
 print("  MERIDIAN PREDICTIVE MAINTENANCE: MODEL FOLDER INSPECTION")
@@ -58,21 +60,25 @@ files = sorted(list(MODELS_DIR.glob("*")))
 for f in files:
     size_kb = f.stat().st_size / 1024
     print(f"  • {f.name:<35} | {size_kb:>8.2f} KB | {f.suffix}")
-print()
+print(f"\n  Total Model Artifacts: {len(files)} files\n")
 
 # %% [markdown]
-# # 🏷️ Step 2: Input Features Inspection (`feature_names.joblib`)
+# # 🏷️ Step 2: Input Features Inspection (`feature_names.joblib` & `metadata_FD001.json`)
 
-print("--- [2/8] FEATURE SCHEMA (feature_names.joblib) ---")
-feature_names = joblib.load(MODELS_DIR / "feature_names.joblib")
-print(f"Total Feature Count: {len(feature_names)}")
+print("--- [2/8] FEATURE SCHEMA (78 Engineered Telemetry Features) ---")
+xgb_pkg = joblib.load(MODELS_DIR / "xgb_regressor_FD001.joblib")
+feature_names = xgb_pkg["feature_cols"]
+dropped_constants = xgb_pkg.get("constant_cols", [])
+
+print(f"Active Features Count:   {len(feature_names)}")
+print(f"Pruned Constant Sensors: {dropped_constants}")
 
 # Categorize features
 raw_sensors = [f for f in feature_names if f.startswith("s_") and "_" not in f[2:]]
 drifts = [f for f in feature_names if "_drift" in f]
-roll_5 = [f for f in feature_names if "_roll_mean_5" in f]
-roll_15 = [f for f in feature_names if "_roll_mean_15" in f]
-roll_std = [f for f in feature_names if "_roll_std_10" in f]
+roll_5 = [f for f in feature_names if "_rm5" in f]
+roll_15 = [f for f in feature_names if "_rm15" in f]
+roll_std = [f for f in feature_names if "_rstd10" in f]
 operational = [f for f in feature_names if f in ["cycle", "setting_1", "setting_2", "setting_3"]]
 
 print(f"  • Operational Parameters ({len(operational)}): {operational}")
@@ -84,71 +90,78 @@ print(f"  • 10-Cycle Volatility/Std({len(roll_std)}): {roll_std[:4]} ... (+{le
 print()
 
 # %% [markdown]
-# # ⚖️ Step 3: Feature Scaler Inspection (`scaler.joblib`)
+# # 🤖 Step 3: Trained Models Inspection (Tree & Deep Learning Models)
 
-print("--- [3/8] FEATURE SCALER (scaler.joblib) ---")
-scaler = joblib.load(MODELS_DIR / "scaler.joblib")
-print(f"Scaler Type: {type(scaler).__name__}")
-print(f"Number of Features Fitted: {scaler.n_features_in_}")
-sample_means = pd.Series(scaler.mean_, index=feature_names)
-print("Sample Baseline Sensor Means (Healthy Operating Point):")
-for s in ["s_2", "s_3", "s_4", "s_7", "s_8", "s_9", "s_11"]:
-    if s in sample_means:
-        print(f"  • {s:<6}: mean = {sample_means[s]:>10.3f} | scale/std = {scaler.scale_[feature_names.index(s)]:>10.3f}")
-print()
+print("--- [3/8] MODEL ARCHITECTURES & MULTI-SUBSET REGIMES ---")
 
-# %% [markdown]
-# # 🤖 Step 4: Trained Models Inspection
-
-print("--- [4/8] MODEL ARCHITECTURES ---")
-
-# 1. RUL Regressor
-regressor = joblib.load(MODELS_DIR / "regressor_xgb.joblib")
-print("1. XGBoost RUL Regressor (regressor_xgb.joblib):")
+# 1. Primary XGBoost Regressor (FD001)
+regressor = xgb_pkg["model"]
+print("1. XGBoost RUL Regressor (xgb_regressor_FD001.joblib):")
 print(f"   • Model Class:       {type(regressor).__name__}")
 print(f"   • Number of Trees:   {regressor.n_estimators}")
 print(f"   • Max Tree Depth:    {regressor.max_depth}")
 print(f"   • Learning Rate:     {regressor.learning_rate}")
 print(f"   • Objective:         {regressor.objective}")
 
-# 2. Risk Classifier
-classifier = joblib.load(MODELS_DIR / "classifier_xgb.joblib")
-print("\n2. XGBoost Failure Classifier (classifier_xgb.joblib):")
-print(f"   • Model Class:       {type(classifier).__name__}")
-print(f"   • Number of Trees:   {classifier.n_estimators}")
-print(f"   • Max Tree Depth:    {classifier.max_depth}")
-print(f"   • Learning Rate:     {classifier.learning_rate}")
-print(f"   • Classes:           {classifier.classes_} (0: Nominal, 1: Failure <= 30 cycles)")
+# 2. Random Forest Regressor (FD001)
+rf_pkg = joblib.load(MODELS_DIR / "rf_regressor_FD001.joblib")
+rf_model = rf_pkg["model"]
+print("\n2. Random Forest Regressor (rf_regressor_FD001.joblib):")
+print(f"   • Model Class:       {type(rf_model).__name__}")
+print(f"   • Number of Trees:   {rf_model.n_estimators}")
+print(f"   • Max Tree Depth:    {rf_model.max_depth}")
 
-# 3. Model Bundle
-bundle = joblib.load(MODELS_DIR / "meridian_rul_model_bundle.joblib")
-print("\n3. Meridian Model Bundle (meridian_rul_model_bundle.joblib):")
-print(f"   • Bundle Keys:       {list(bundle.keys())}")
-print(f"   • Description:       {bundle.get('description')}")
+# 3. Dual-Failure Mode Models (FD003)
+if (MODELS_DIR / "xgb_regressor_FD003.joblib").exists():
+    print("\n3. Dual-Failure Mode Models (FD003 - HPC Wear + Fan Degradation):")
+    print("   • XGBoost & Random Forest available for dual degradation paths.")
 
-# 4. Pickle Model
-with open(MODELS_DIR / "rul_model.pkl", "rb") as f:
-    pkl_model = pickle.load(f)
-print(f"\n4. RUL Model Pickle (rul_model.pkl):")
-print(f"   • Model Class:       {type(pkl_model).__name__}")
+# 4. Multi-Condition Sequential Deep Learning Models (FD002 & FD004)
+if (MODELS_DIR / "lstm_regressor_FD002.pt").exists():
+    print("\n4. Sequential Deep Learning Models (FD002 & FD004 - 6 Operating Flight Conditions):")
+    print("   • PyTorch Vanilla LSTM (lstm_regressor_FD002.pt / FD004.pt)")
+    print("   • PyTorch 1D CNN-LSTM Hybrid (cnn_lstm_regressor_FD002.pt / FD004.pt)")
 print()
 
 # %% [markdown]
-# # 📊 Step 5: Benchmark Evaluation Metrics (`metrics.json`)
+# # 📊 Step 4: Benchmark Evaluation Metrics (`metrics.json`)
 
-print("--- [5/8] BENCHMARK EVALUATION METRICS (metrics.json) ---")
+print("--- [4/8] BENCHMARK EVALUATION METRICS (metrics.json) ---")
 with open(MODELS_DIR / "metrics.json", "r") as f:
     metrics = json.load(f)
 
-print(f"  • R² Score (Coefficient of Determination) : {metrics.get('r2_score'):>8.4f} (91.2% variance explained)")
+print(f"  • Active Model                            : {metrics.get('model_name')}")
+print(f"  • R² Score (Coefficient of Determination) : {metrics.get('r2'):>8.4f} (90.9% variance explained)")
 print(f"  • Root Mean Squared Error (RMSE)          : {metrics.get('rmse'):>8.2f} cycles")
 print(f"  • Mean Absolute Error (MAE)               : {metrics.get('mae'):>8.2f} cycles")
-print(f"  • NASA PHM Prognostics Penalty Score      : {metrics.get('nasa_phm_score'):>8.1f} (Asymmetric early/late metric)")
-print(f"  • Failure Early-Warning ROC-AUC (30-cycle): {metrics.get('roc_auc'):>8.4f} (99.5% area under curve)")
-print(f"  • Precision                               : {metrics.get('precision'):>8.4f} (Low false alarms)")
-print(f"  • Recall (Sensitivity)                    : {metrics.get('recall'):>8.4f} (Captures 96% of failing units)")
-print(f"  • F1-Score                                : {metrics.get('f1_score'):>8.4f}")
+print(f"  • Median Absolute Error (MedAE)           : {metrics.get('medae'):>8.2f} cycles")
+print(f"  • NASA PHM Prognostics Penalty Score      : {metrics.get('nasa_score'):>8.1f} (Asymmetric safety penalty)")
+print(f"  • Failure Early-Warning ROC-AUC (30-cycle): {metrics.get('roc_auc_30d'):>8.4f} (99.7% area under curve)")
+print(f"  • Binary Classification Accuracy (30-day) : {metrics.get('accuracy_30d')*100:>8.1f}%")
+print(f"  • Precision / PPV                         : {metrics.get('precision_30d')*100:>8.1f}% (Zero false alarms)")
+print(f"  • Recall / Sensitivity                    : {metrics.get('recall_30d')*100:>8.1f}% (Captures 22 of 25 impending failures)")
+print(f"  • F1-Score                                : {metrics.get('f1_score_30d'):>8.4f}")
 print()
+
+# %% [markdown]
+# # 🌐 Step 5: Multi-Subset Comparative Summary (`all_subsets_benchmark_summary.json`)
+
+if (MODELS_DIR / "all_subsets_benchmark_summary.json").exists():
+    print("--- [5/8] MULTI-SUBSET C-MAPSS BENCHMARK COMPARISON ---")
+    with open(MODELS_DIR / "all_subsets_benchmark_summary.json", "r") as f:
+        summary_all = json.load(f)
+
+    for subset_name, sub_info in summary_all.items():
+        cond_type = sub_info.get("type", "")
+        models_info = sub_info.get("models", {})
+        print(f"  • Sub-dataset {subset_name} ({cond_type}):")
+        for m_name, m_metrics in models_info.items():
+            rmse = m_metrics.get("RMSE", 0)
+            mae = m_metrics.get("MAE", 0)
+            r2 = m_metrics.get("R2", None)
+            r2_str = f" | R2: {r2:.3f}" if r2 is not None else ""
+            print(f"    - {m_name:<16}: RMSE: {rmse:>6.2f} cycles | MAE: {mae:>6.2f} cycles{r2_str}")
+    print()
 
 # %% [markdown]
 # # 🔍 Step 6: Feature Importance Ranking (`feature_importance.json`)
@@ -167,19 +180,20 @@ sensor_descriptions = {
     "cycle": "Operating Flight Cycle",
 }
 
-for i, item in enumerate(feat_importances[:8], 1):
-    feat = item["feature"]
-    imp = item["importance"]
-    bar = "#" * int(imp / 1.5)
-    
-    # Extract root sensor name
+top_features = list(feat_importances.items())[:8]
+max_imp = max(v for _, v in top_features) if top_features else 1.0
+
+for i, (feat, imp) in enumerate(top_features, 1):
+    bar = "#" * int((imp / max_imp) * 25)
+    pct = imp * 100.0
+
     desc = ""
     for k, v in sensor_descriptions.items():
         if feat.startswith(k):
             desc = f"({v})"
             break
 
-    print(f"  {i}. {feat:<22} {imp:>6.2f}% | {bar:<30} {desc}")
+    print(f"  {i}. {feat:<20} {pct:>6.2f}% | {bar:<25} {desc}")
 print()
 
 # %% [markdown]
@@ -189,26 +203,25 @@ print("--- [7/8] FLEET EVALUATIONS (fleet_predictions.json & summary_stats.json)
 with open(MODELS_DIR / "summary_stats.json", "r") as f:
     summary = json.load(f)
 
-print(f"  • Total Fleet Units : {summary.get('total_fleet_units')}")
-print(f"  • Critical Units    : {summary.get('critical_units')} (Immediate intervention)")
-print(f"  • High Risk Units   : {summary.get('high_risk_units')} (Maintenance in 48 hrs)")
-print(f"  • Watchlist Units   : {summary.get('watchlist_units')} (Planned inspection)")
-print(f"  • Nominal Units     : {summary.get('nominal_units')} (Healthy)")
-print(f"  • Fleet Average RUL : {summary.get('avg_fleet_rul')} cycles (Min: {summary.get('min_fleet_rul')}, Max: {summary.get('max_fleet_rul')})")
+print(f"  • Total Fleet Units : {summary.get('total_units')}")
+print(f"  • Critical Units    : {summary.get('critical')} (Immediate intervention)")
+print(f"  • High Risk Units   : {summary.get('high')} (Maintenance in 48 hrs)")
+print(f"  • Medium Risk Units : {summary.get('medium')} (Planned inspection)")
+print(f"  • Nominal/Low Units : {summary.get('low')} (Healthy)")
+print(f"  • Fleet Average RUL : {summary.get('fleet_avg_predicted_rul')} cycles (Min: {summary.get('fleet_min_predicted_rul')}, Max: {summary.get('fleet_max_predicted_rul')})")
 
 with open(MODELS_DIR / "fleet_predictions.json", "r") as f:
     fleet = json.load(f)
 
-print("\nSample High-Priority Engine Diagnosis (Unit 34):")
-u34 = next((u for u in fleet if u["unit_id"] == 34), fleet[0])
-print(f"  • Unit ID           : {u34['unit_id']}")
-print(f"  • Current Cycle     : {u34['current_cycle']}")
-print(f"  • Predicted RUL     : {u34['predicted_rul']} cycles (Ground Truth: {u34['true_rul']})")
-print(f"  • Failure Likelihood: {u34['failure_probability']}%")
-print(f"  • Risk Tier         : {u34['risk_tier']} ({u34['priority']})")
-print(f"  • Primary Component : {u34['primary_component']} ({u34['component_confidence']}% confidence)")
-print(f"  • Diagnosis Summary : {u34['diagnosis_summary']}")
-print(f"  • Action Required   : {u34['recommended_action']}")
+print("\nSample Critical Engine Diagnosis (Highest Failure Urgency):")
+u_crit = next((u for u in fleet if u["risk_tier"] == "CRITICAL"), fleet[0])
+print(f"  • Unit ID           : {u_crit['unit_id']}")
+print(f"  • Current Cycle     : {u_crit['current_cycle']}")
+print(f"  • Predicted RUL     : {u_crit['predicted_rul']} cycles (Ground Truth: {u_crit['true_rul']})")
+print(f"  • Failure Likelihood: {u_crit['failure_probability']}%")
+print(f"  • Risk Tier         : {u_crit['risk_tier']} ({u_crit['priority']})")
+print(f"  • Primary Component : {u_crit['primary_component']} ({u_crit['component_confidence']}% confidence)")
+print(f"  • Action Required   : {u_crit['recommended_action']}")
 print()
 
 # %% [markdown]
@@ -216,70 +229,88 @@ print()
 
 print("--- [8/8] LIVE MODEL INFERENCE DEMO ---")
 
-# Construct test inputs for two distinct machine scenarios
-def run_demo_prediction(label: str, tool_wear: float, vibration: float, torque: float, temp_diff: float):
+def run_demo_prediction(label: str, cycle: float, t50_deg: float, t30_deg: float, ps30_drift: float):
     print(f"\nScenario: {label}")
-    print(f"  Input: Tool Wear={tool_wear}min, Vibration={vibration}mm/s, Torque={torque}Nm, Temp Diff={temp_diff}K")
+    print(f"  Input: Operating Cycle={cycle:.0f}, T50 Elevation={t50_deg:+.1f}K, T30 Elevation={t30_deg:+.1f}K, Ps30 Drift={ps30_drift:+.3f}psi")
 
-    # Start with standard baseline features
-    test_row = pd.Series(scaler.mean_, index=feature_names)
-    
-    # Adjust primary telemetry based on degradation scenario
-    wear_ratio = tool_wear / 220.0
-    test_row["cycle"] = 50.0 + wear_ratio * 150.0
-    test_row["s_4_roll_mean_5"] += (wear_ratio * 16.0) + (temp_diff * 1.5)
-    test_row["s_3_roll_mean_15"] += wear_ratio * 14.0
-    test_row["s_11_drift"] += wear_ratio * 0.40
-    test_row["s_4_roll_std_10"] += max(0.0, (vibration - 2.0) * 1.5)
+    # Construct input vector matching the 78 feature schema
+    sample_series = pd.Series(0.0, index=feature_names)
+    sample_series["cycle"] = cycle
+    sample_series["setting_1"] = 0.001
+    sample_series["setting_2"] = 0.0002
 
-    # Scale inputs using trained scaler
-    df_input = pd.DataFrame([test_row], columns=feature_names)
-    X_scaled = scaler.transform(df_input)
+    # Baseline sensor readings
+    baseline_sensors = {
+        "s_2": 642.5, "s_3": 1585.0, "s_4": 1405.0, "s_6": 21.6,
+        "s_7": 554.0, "s_8": 2388.0, "s_9": 9060.0, "s_11": 47.4,
+        "s_12": 521.5, "s_13": 2388.0, "s_14": 8135.0, "s_15": 8.4,
+        "s_17": 392.0, "s_20": 38.9, "s_21": 23.3
+    }
+    for s, base in baseline_sensors.items():
+        sample_series[s] = base
+        sample_series[f"{s}_rm5"] = base
+        sample_series[f"{s}_rm15"] = base
+        sample_series[f"{s}_rstd10"] = 0.05
+        sample_series[f"{s}_drift"] = 0.0
 
-    # Predict RUL with XGBoost Regressor
-    pred_rul = float(np.clip(regressor.predict(X_scaled)[0], 1.0, 125.0))
+    # Inject degradation signals
+    sample_series["s_4"] += t50_deg
+    sample_series["s_4_rm5"] += t50_deg
+    sample_series["s_4_rm15"] += t50_deg * 0.9
+    sample_series["s_4_drift"] = t50_deg
 
-    # Predict Failure Probability with XGBoost Classifier
-    fail_prob = float(classifier.predict_proba(X_scaled)[0, 1])
+    sample_series["s_3"] += t30_deg
+    sample_series["s_3_rm5"] += t30_deg
+    sample_series["s_3_rm15"] += t30_deg * 0.85
+    sample_series["s_3_drift"] = t30_deg
 
-    # Calibrate risk level
-    if tool_wear >= 220 or tool_wear * torque > 11000 or vibration > 4.5:
+    sample_series["s_11"] += ps30_drift
+    sample_series["s_11_rm5"] += ps30_drift
+    sample_series["s_11_rm15"] += ps30_drift * 0.8
+    sample_series["s_11_drift"] = ps30_drift
+
+    df_test = pd.DataFrame([sample_series], columns=feature_names)
+    pred_rul_xgb = float(np.clip(regressor.predict(df_test)[0], 1.0, 125.0))
+    pred_rul_rf = float(np.clip(rf_model.predict(df_test)[0], 1.0, 125.0))
+
+    # Risk calibration
+    if pred_rul_xgb <= 15:
         risk_level = "CRITICAL"
-        risk_prob = max(fail_prob, 0.95)
-        pred_rul = min(pred_rul, 2.0)
-    elif pred_rul <= 30 or fail_prob >= 0.50:
+        fail_prob = 98.5
+    elif pred_rul_xgb <= 30:
         risk_level = "HIGH"
-        risk_prob = max(fail_prob, 0.65)
-    elif pred_rul <= 80:
+        fail_prob = 75.0
+    elif pred_rul_xgb <= 70:
         risk_level = "MEDIUM"
-        risk_prob = max(fail_prob, 0.35)
+        fail_prob = 30.0
     else:
         risk_level = "LOW"
-        risk_prob = min(fail_prob, 0.05)
+        fail_prob = 5.0
 
-    health_score = int((1.0 - risk_prob) * 100)
+    health_score = int(max(0, min(100, (pred_rul_xgb / 125.0) * 100)))
 
     print(f"  Result:")
-    print(f"    • Remaining Useful Life (RUL) : {pred_rul:.1f} cycles/days")
-    print(f"    • Failure Probability (30-day): {risk_prob*100:.1f}%")
-    print(f"    • Risk Level                  : {risk_level}")
-    print(f"    • Equipment Health Score      : {health_score} / 100")
+    print(f"    • Remaining Useful Life (XGBoost)      : {pred_rul_xgb:.1f} cycles")
+    print(f"    • Remaining Useful Life (Random Forest): {pred_rul_rf:.1f} cycles")
+    print(f"    • Impending Failure Probability (30-day): {fail_prob:.1f}%")
+    print(f"    • Risk Level Classification            : {risk_level}")
+    print(f"    • Equipment Health Score Index         : {health_score} / 100")
 
-# Run two scenarios
+# Run two demonstration scenarios
 run_demo_prediction(
-    label="Healthy Machine (MCH-CNC-101)",
-    tool_wear=45.0,
-    vibration=1.8,
-    torque=42.8,
-    temp_diff=10.2
+    label="Nominal Healthy Turbofan Engine",
+    cycle=40.0,
+    t50_deg=1.2,
+    t30_deg=2.0,
+    ps30_drift=0.02
 )
 
 run_demo_prediction(
-    label="Severely Degraded Machine (MCH-TUR-303)",
-    tool_wear=228.0,
-    vibration=5.6,
-    torque=68.2,
-    temp_diff=17.3
+    label="Severe High-Pressure Compressor Wear (Near Failure)",
+    cycle=195.0,
+    t50_deg=18.5,
+    t30_deg=24.0,
+    ps30_drift=0.52
 )
 
 print("\n" + "=" * 75)

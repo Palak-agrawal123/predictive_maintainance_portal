@@ -12,25 +12,25 @@ import pandas as pd
 import joblib
 
 CURRENT_DIR = Path(__file__).resolve().parent
-UPDATED_MODELS_DIR = CURRENT_DIR / "Updated_Models"
-if not UPDATED_MODELS_DIR.exists():
-    UPDATED_MODELS_DIR = CURRENT_DIR.parent / "Updated_Models"
-
-LEGACY_MODELS_DIR = CURRENT_DIR / "models"
+MODELS_DIR = CURRENT_DIR / "models"
+if not (MODELS_DIR / "xgb_regressor_FD001.joblib").exists():
+    MODELS_DIR = CURRENT_DIR / "Updated_Models"
+if not (MODELS_DIR / "xgb_regressor_FD001.joblib").exists():
+    MODELS_DIR = CURRENT_DIR.parent / "Updated_Models"
 
 class MLPredictor:
-    def __init__(self, updated_dir: Path = UPDATED_MODELS_DIR):
-        self.updated_dir = Path(updated_dir)
+    def __init__(self, models_dir: Path = MODELS_DIR):
+        self.models_dir = Path(models_dir)
         self.is_loaded = False
         self.load_models()
 
     def load_models(self):
         try:
-            # 1. Load Updated Models (Primary)
-            xgb_path = self.updated_dir / "xgb_regressor_FD001.joblib"
-            rf_path = self.updated_dir / "rf_regressor_FD001.joblib"
-            summary_path = self.updated_dir / "all_subsets_benchmark_summary.json"
-            meta_path = self.updated_dir / "metadata_FD001.json"
+            # 1. Load Primary Updated Models from models directory
+            xgb_path = self.models_dir / "xgb_regressor_FD001.joblib"
+            rf_path = self.models_dir / "rf_regressor_FD001.joblib"
+            summary_path = self.models_dir / "all_subsets_benchmark_summary.json"
+            meta_path = self.models_dir / "metadata_FD001.json"
 
             if xgb_path.exists():
                 self.xgb_pkg = joblib.load(xgb_path)
@@ -40,27 +40,27 @@ class MLPredictor:
                 self.feature_names = self.xgb_pkg["feature_cols"]
                 self.constant_cols = self.xgb_pkg.get("constant_cols", [])
 
-                with open(summary_path, "r") as f:
-                    self.all_subsets_summary = json.load(f)
+                if summary_path.exists():
+                    with open(summary_path, "r") as f:
+                        self.all_subsets_summary = json.load(f)
+                else:
+                    self.all_subsets_summary = {}
 
-                with open(meta_path, "r") as f:
-                    self.metadata = json.load(f)
+                if meta_path.exists():
+                    with open(meta_path, "r") as f:
+                        self.metadata = json.load(f)
+                else:
+                    self.metadata = {}
 
                 self.metrics = self.metadata.get("models", {}).get("XGBoost", {})
                 self.model_version = "meridian-updated-xgb-v2.0"
-                print(f"[MLPredictor] Loaded newly trained models successfully from {self.updated_dir}")
+                print(f"[MLPredictor] Loaded newly trained models successfully from {self.models_dir}")
             else:
-                # Fallback to legacy models
-                self.regressor = joblib.load(LEGACY_MODELS_DIR / "regressor_xgb.joblib")
-                self.classifier = joblib.load(LEGACY_MODELS_DIR / "classifier_xgb.joblib")
-                self.scaler = joblib.load(LEGACY_MODELS_DIR / "scaler.joblib")
-                self.feature_names = joblib.load(LEGACY_MODELS_DIR / "feature_names.joblib")
-                self.model_version = "meridian-xgb-v1.0"
-                print(f"[MLPredictor] Loaded legacy models from {LEGACY_MODELS_DIR}")
+                raise FileNotFoundError(f"Model file not found at {xgb_path}")
 
             # Precomputed fleet predictions if available
             self.fleet_predictions = {}
-            fleet_path = LEGACY_MODELS_DIR / "fleet_predictions.json"
+            fleet_path = self.models_dir / "fleet_predictions.json"
             if fleet_path.exists():
                 with open(fleet_path, "r") as f:
                     fleet_list = json.load(f)

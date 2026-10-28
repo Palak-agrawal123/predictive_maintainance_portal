@@ -464,6 +464,14 @@ def main():
     with open(summary_file, "w") as f:
         json.dump(all_summaries, f, indent=2)
 
+    # Sync trained artifacts directly to ml_service/models/ for production deployment
+    ml_models_dir = BASE_DIR / "ml_service" / "models"
+    if ml_models_dir.exists():
+        import shutil
+        for p in OUTPUT_DIR.glob("*"):
+            shutil.copy2(p, ml_models_dir / p.name)
+        print(f"  Synchronized {len(list(OUTPUT_DIR.glob('*')))} model artifacts into ml_service/models/")
+
     elapsed = time.time() - start_time
     print(f"\n{'='*70}")
     print(f"  ALL MODELS SUCCESSFULLY TRAINED AND SAVED TO Updated_Models/ in {elapsed:.1f}s")

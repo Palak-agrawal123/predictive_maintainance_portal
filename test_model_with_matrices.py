@@ -38,8 +38,10 @@ if hasattr(sys.stdout, 'reconfigure'):
 # Add directories to path
 BASE_DIR = Path(__file__).resolve().parent
 ML_DIR = BASE_DIR / "ml_service"
-UPDATED_MODELS_DIR = BASE_DIR / "Updated_Models"
-if not UPDATED_MODELS_DIR.exists():
+UPDATED_MODELS_DIR = ML_DIR / "models"
+if not (UPDATED_MODELS_DIR / "xgb_regressor_FD001.joblib").exists():
+    UPDATED_MODELS_DIR = BASE_DIR / "Updated_Models"
+if not (UPDATED_MODELS_DIR / "xgb_regressor_FD001.joblib").exists():
     UPDATED_MODELS_DIR = ML_DIR / "Updated_Models"
 
 DATA_DIR = BASE_DIR / "CMaps"

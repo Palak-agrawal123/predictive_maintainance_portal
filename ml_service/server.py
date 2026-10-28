@@ -17,7 +17,7 @@ from predictor import predictor
 
 app = FastAPI(
     title="Predictive Maintenance ML Microservice",
-    description="FastAPI microservice serving newly trained XGBoost & Random Forest RUL models (Updated_Models)",
+    description="FastAPI microservice serving newly trained XGBoost & Random Forest RUL models (ml_service/models)",
     version="2.0.0"
 )
 
@@ -42,8 +42,8 @@ def get_service_info():
         "status": "online",
         "service": "predictive-maintenance-ml-microservice",
         "version": "2.0.0",
-        "activeModel": "XGBoost Regressor (Updated_Models/xgb_regressor_FD001.joblib)",
-        "alternativeModel": "Random Forest Regressor (Updated_Models/rf_regressor_FD001.joblib)",
+        "activeModel": "XGBoost Regressor (models/xgb_regressor_FD001.joblib)",
+        "alternativeModel": "Random Forest Regressor (models/rf_regressor_FD001.joblib)",
         "dataset": "NASA Turbofan C-MAPSS (FD001-FD004) & Industrial Telemetry",
         "featuresCount": len(predictor.feature_names),
         "benchmarkMetrics": predictor.metrics,
@@ -58,8 +58,8 @@ def healthcheck():
         "modelVersion": predictor.model_version,
         "featuresCount": len(predictor.feature_names),
         "models": {
-            "xgb_regressor": "Updated_Models/xgb_regressor_FD001.joblib",
-            "rf_regressor": "Updated_Models/rf_regressor_FD001.joblib"
+            "xgb_regressor": "models/xgb_regressor_FD001.joblib",
+            "rf_regressor": "models/rf_regressor_FD001.joblib"
         }
     }
 
