@@ -1,0 +1,10 @@
+{
+    "total_fleet_units": 100,
+    "critical_units": 18,
+    "high_risk_units": 13,
+    "watchlist_units": 22,
+    "nominal_units": 47,
+    "avg_fleet_rul": 74.3,
+    "min_fleet_rul": 5.4,
+    "max_fleet_rul": 124.3
+}
