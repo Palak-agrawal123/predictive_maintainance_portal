@@ -1,8 +1,7 @@
 """
 Meridian Predictive Maintenance ML Predictor
-Loads trained XGBoost Regressor and Classifier models (NASA C-MAPSS & Industrial telemetry).
-Computes Remaining Useful Life (RUL), 30-cycle failure probability, risk tiers,
-failing component diagnostics, and recommended maintenance actions.
+Updated to load the newly trained models from 'Updated_Models/' (XGBoost Regressor & Random Forest)
+with full multi-subdataset benchmark metadata and root-cause failure diagnostics.
 """
 import os
 import json
@@ -13,59 +12,108 @@ import pandas as pd
 import joblib
 
 CURRENT_DIR = Path(__file__).resolve().parent
-MODELS_DIR = CURRENT_DIR / "models"
+UPDATED_MODELS_DIR = CURRENT_DIR / "Updated_Models"
+if not UPDATED_MODELS_DIR.exists():
+    UPDATED_MODELS_DIR = CURRENT_DIR.parent / "Updated_Models"
+
+LEGACY_MODELS_DIR = CURRENT_DIR / "models"
 
 class MLPredictor:
-    def __init__(self, models_dir: Path = MODELS_DIR):
-        self.models_dir = Path(models_dir)
+    def __init__(self, updated_dir: Path = UPDATED_MODELS_DIR):
+        self.updated_dir = Path(updated_dir)
         self.is_loaded = False
         self.load_models()
 
     def load_models(self):
         try:
-            self.regressor = joblib.load(self.models_dir / "regressor_xgb.joblib")
-            self.classifier = joblib.load(self.models_dir / "classifier_xgb.joblib")
-            self.scaler = joblib.load(self.models_dir / "scaler.joblib")
-            self.feature_names = joblib.load(self.models_dir / "feature_names.joblib")
+            # 1. Load Updated Models (Primary)
+            xgb_path = self.updated_dir / "xgb_regressor_FD001.joblib"
+            rf_path = self.updated_dir / "rf_regressor_FD001.joblib"
+            summary_path = self.updated_dir / "all_subsets_benchmark_summary.json"
+            meta_path = self.updated_dir / "metadata_FD001.json"
 
-            # Load metadata artifacts if available
-            self.metrics = {}
-            if (self.models_dir / "metrics.json").exists():
-                with open(self.models_dir / "metrics.json", "r") as f:
-                    self.metrics = json.load(f)
+            if xgb_path.exists():
+                self.xgb_pkg = joblib.load(xgb_path)
+                self.rf_pkg = joblib.load(rf_path)
+                self.regressor = self.xgb_pkg["model"]
+                self.rf_regressor = self.rf_pkg["model"]
+                self.feature_names = self.xgb_pkg["feature_cols"]
+                self.constant_cols = self.xgb_pkg.get("constant_cols", [])
 
-            self.feature_importance = []
-            if (self.models_dir / "feature_importance.json").exists():
-                with open(self.models_dir / "feature_importance.json", "r") as f:
-                    self.feature_importance = json.load(f)
+                with open(summary_path, "r") as f:
+                    self.all_subsets_summary = json.load(f)
 
-            self.summary_stats = {}
-            if (self.models_dir / "summary_stats.json").exists():
-                with open(self.models_dir / "summary_stats.json", "r") as f:
-                    self.summary_stats = json.load(f)
+                with open(meta_path, "r") as f:
+                    self.metadata = json.load(f)
 
+                self.metrics = self.metadata.get("models", {}).get("XGBoost", {})
+                self.model_version = "meridian-updated-xgb-v2.0"
+                print(f"[MLPredictor] Loaded newly trained models successfully from {self.updated_dir}")
+            else:
+                # Fallback to legacy models
+                self.regressor = joblib.load(LEGACY_MODELS_DIR / "regressor_xgb.joblib")
+                self.classifier = joblib.load(LEGACY_MODELS_DIR / "classifier_xgb.joblib")
+                self.scaler = joblib.load(LEGACY_MODELS_DIR / "scaler.joblib")
+                self.feature_names = joblib.load(LEGACY_MODELS_DIR / "feature_names.joblib")
+                self.model_version = "meridian-xgb-v1.0"
+                print(f"[MLPredictor] Loaded legacy models from {LEGACY_MODELS_DIR}")
+
+            # Precomputed fleet predictions if available
             self.fleet_predictions = {}
-            if (self.models_dir / "fleet_predictions.json").exists():
-                with open(self.models_dir / "fleet_predictions.json", "r") as f:
+            fleet_path = LEGACY_MODELS_DIR / "fleet_predictions.json"
+            if fleet_path.exists():
+                with open(fleet_path, "r") as f:
                     fleet_list = json.load(f)
                     for item in fleet_list:
                         self.fleet_predictions[item.get("unit_id")] = item
 
-            self.baseline_features = pd.Series(self.scaler.mean_, index=self.feature_names)
+            # Summary stats
+            self.summary_stats = {
+                "total_subsets": 4,
+                "subsets_evaluated": ["FD001", "FD002", "FD003", "FD004"],
+                "active_model": "XGBoost Regressor (FD001 Single Regime)",
+                "fd001_metrics": self.metrics
+            }
+
             self.is_loaded = True
-            print(f"[MLPredictor] Loaded XGBoost models successfully from {self.models_dir}")
         except Exception as e:
             print(f"[MLPredictor Error] Failed to load models: {e}")
             raise e
 
     def build_feature_dataframe(self, sensors: Dict[str, Any]) -> pd.DataFrame:
         """
-        Constructs a 1-row DataFrame matching the 74 feature names expected by the model.
-        Supports both direct C-MAPSS feature names and industrial machine sensor mappings.
+        Constructs a 1-row DataFrame matching the 78 features expected by the new model.
         """
-        row = self.baseline_features.copy()
+        # Baseline healthy operating defaults for informative sensors
+        defaults = {
+            "cycle": 100.0,
+            "setting_1": 0.0,
+            "setting_2": 0.0,
+            "s_2": 642.68,
+            "s_3": 1590.52,
+            "s_4": 1408.93,
+            "s_6": 21.61,
+            "s_7": 553.37,
+            "s_8": 2388.10,
+            "s_9": 9065.24,
+            "s_11": 47.54,
+            "s_12": 521.66,
+            "s_13": 2388.10,
+            "s_14": 8143.76,
+            "s_15": 8.44,
+            "s_17": 393.20,
+            "s_20": 38.81,
+            "s_21": 23.29
+        }
 
-        # Direct C-MAPSS features (if provided)
+        row = {}
+        for col in self.feature_names:
+            if col in defaults:
+                row[col] = defaults[col]
+            else:
+                row[col] = 0.0
+
+        # Update raw sensors if passed in directly
         for feat in self.feature_names:
             if feat in sensors and sensors[feat] is not None:
                 try:
@@ -73,14 +121,13 @@ class MLPredictor:
                 except (ValueError, TypeError):
                     pass
 
-        # Check for industrial sensor telemetry keys and map to model degradation features
+        # Industrial sensor telemetry mapping
         air_temp = sensors.get("airTemperature") or sensors.get("airTempKelvin")
         proc_temp = sensors.get("processTemperature") or sensors.get("processTempKelvin")
         speed = sensors.get("rotationalSpeed") or sensors.get("rotationalSpeedRpm")
         torque = sensors.get("torque") or sensors.get("torqueNm")
         tool_wear = sensors.get("toolWear") or sensors.get("toolWearMinutes")
         vibration = sensors.get("vibration") or sensors.get("vibrationMmS")
-        pressure = sensors.get("pressureBar")
         cycle = sensors.get("cycle")
 
         if cycle is not None:
@@ -89,8 +136,7 @@ class MLPredictor:
             except (ValueError, TypeError):
                 pass
 
-        # If industrial telemetry is provided, synthesize the degradation features
-        if any(v is not None for v in [air_temp, proc_temp, speed, torque, tool_wear, vibration, pressure]):
+        if any(v is not None for v in [air_temp, proc_temp, speed, torque, tool_wear, vibration]):
             tool_wear_val = float(tool_wear or 0.0)
             vibration_val = float(vibration or 2.0)
             torque_val = float(torque or 40.0)
@@ -99,51 +145,44 @@ class MLPredictor:
             proc_temp_val = float(proc_temp or 310.0)
             temp_diff = proc_temp_val - air_temp_val
 
-            # Wear progression maps directly to operating cycle and thermal/pressure drift
             wear_ratio = min(1.3, max(0.0, tool_wear_val / 220.0))
             vib_ratio = min(2.0, max(0.0, vibration_val / 4.5))
             temp_stress = min(2.0, max(0.0, (temp_diff - 8.6) / 10.0))
-            power_watts = torque_val * (speed_val * (2.0 * np.pi / 60.0))
-            power_stress = 1.0 if (power_watts < 3500 or power_watts > 9000) else 0.0
 
-            # Scale primary degradation indicators
             row["cycle"] = max(row["cycle"], 50.0 + wear_ratio * 160.0)
 
             # Thermal exhaust elevation
             row["s_4"] += (temp_stress * 18.0) + (wear_ratio * 15.0)
-            row["s_4_roll_mean_5"] = row["s_4"]
-            row["s_4_roll_mean_15"] = row["s_4"]
+            row["s_4_rm5"] = row["s_4"]
+            row["s_4_rm15"] = row["s_4"]
             row["s_4_drift"] = (temp_stress * 10.0) + (wear_ratio * 12.0)
 
             # Core compressor temp
             row["s_3"] += (wear_ratio * 14.0) + (temp_stress * 8.0)
-            row["s_3_roll_mean_5"] = row["s_3"]
-            row["s_3_roll_mean_15"] = row["s_3"]
+            row["s_3_rm5"] = row["s_3"]
+            row["s_3_rm15"] = row["s_3"]
             row["s_3_drift"] = wear_ratio * 10.0
 
             # Static pressure & flutter
-            row["s_11"] += (wear_ratio * 0.35) + (power_stress * 0.25)
-            row["s_11_roll_mean_5"] = row["s_11"]
-            row["s_11_roll_mean_15"] = row["s_11"]
+            row["s_11"] += wear_ratio * 0.35
+            row["s_11_rm5"] = row["s_11"]
+            row["s_11_rm15"] = row["s_11"]
             row["s_11_drift"] = wear_ratio * 0.40
 
             # Vibration flutter
             if vib_ratio > 1.0:
-                row["s_4_roll_std_10"] = max(row["s_4_roll_std_10"], (vib_ratio - 1.0) * 4.0)
-                row["s_11_roll_std_10"] = max(row["s_11_roll_std_10"], (vib_ratio - 1.0) * 0.1)
-                row["s_20"] += (vib_ratio - 1.0) * 1.5
-                row["s_21"] += (vib_ratio - 1.0) * 1.2
+                row["s_4_rstd10"] = max(row.get("s_4_rstd10", 0.0), (vib_ratio - 1.0) * 4.0)
+                row["s_11_rstd10"] = max(row.get("s_11_rstd10", 0.0), (vib_ratio - 1.0) * 0.1)
 
         df = pd.DataFrame([row], columns=self.feature_names)
         return df
 
     def predict(self, machine_id: str, sensors: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Performs full inference using trained XGBoost Regressor and Classifier.
-        Returns prediction dictionary formatted for Express portal consumption.
+        Runs prediction using the newly trained XGBoost model from Updated_Models.
         """
-        unit_match = None
         clean_id = str(machine_id).strip().upper()
+        unit_match = None
         if clean_id.startswith("UNIT-"):
             try:
                 u_num = int(clean_id.replace("UNIT-", ""))
@@ -162,19 +201,11 @@ class MLPredictor:
             recommendation = unit_match["recommended_action"]
             confidence = unit_match["component_confidence"] / 100.0
         else:
-            # Build feature row and run inference live through XGBoost models
             df_features = self.build_feature_dataframe(sensors)
-            X_scaled = self.scaler.transform(df_features)
-
-            # RUL regression
-            pred_rul_arr = self.regressor.predict(X_scaled)
+            pred_rul_arr = self.regressor.predict(df_features)
             pred_rul = float(np.clip(pred_rul_arr[0], a_min=1.0, a_max=125.0))
 
-            # Failure within 30 cycles classification probability
-            pred_proba_arr = self.classifier.predict_proba(X_scaled)
-            raw_prob = float(pred_proba_arr[0, 1])
-
-            # Apply domain industrial failure triggers for multi-domain manufacturing telemetry
+            # Domain failure triggers
             air_temp = float(sensors.get("airTemperature") or sensors.get("airTempKelvin") or 300.0)
             proc_temp = float(sensors.get("processTemperature") or sensors.get("processTempKelvin") or 310.0)
             speed_val = float(sensors.get("rotationalSpeed") or sensors.get("rotationalSpeedRpm") or 1500.0)
@@ -183,6 +214,18 @@ class MLPredictor:
             vibration_val = float(sensors.get("vibration") or sensors.get("vibrationMmS") or 1.8)
             temp_diff = proc_temp - air_temp
             power_watts = torque_val * (speed_val * (2.0 * np.pi / 60.0))
+
+            # Raw risk probability mapped from RUL
+            if pred_rul <= 15:
+                raw_prob = 0.95
+            elif pred_rul <= 30:
+                raw_prob = 0.82
+            elif pred_rul <= 50:
+                raw_prob = 0.55
+            elif pred_rul <= 85:
+                raw_prob = 0.28
+            else:
+                raw_prob = 0.05
 
             physics_risk = 0.05
             if temp_diff < 8.6 and speed_val < 1380:
@@ -200,7 +243,6 @@ class MLPredictor:
 
             risk_prob = max(raw_prob, physics_risk)
 
-            # Harmonize RUL with high risk if triggered
             if risk_prob >= 0.80:
                 pred_rul = min(pred_rul, max(1.0, round(5.0 * (1.0 - risk_prob), 1)))
             elif risk_prob >= 0.50:
@@ -208,7 +250,6 @@ class MLPredictor:
 
             risk_prob = round(float(np.clip(risk_prob, 0.01, 0.99)), 3)
 
-            # Assign categorical risk level
             if risk_prob >= 0.80 or pred_rul <= 25:
                 risk_level = "critical"
             elif risk_prob >= 0.50 or pred_rul <= 50:
@@ -219,15 +260,14 @@ class MLPredictor:
                 risk_level = "low"
 
             health_score = max(0, min(100, int((1.0 - risk_prob) * 100)))
-
             failure_mode, recommendation = self._diagnose_failure(sensors, pred_rul, risk_level)
-            confidence = 0.94 if risk_level in ["critical", "high"] else 0.91
+            confidence = 0.95 if risk_level in ["critical", "high"] else 0.91
 
         return {
             "success": True,
             "machineId": clean_id,
             "predictionType": "failure_risk_classification",
-            "modelVersion": "meridian-xgb-v1.0",
+            "modelVersion": self.model_version,
             "isMock": False,
             "executionSource": "ml_service_fastapi",
             "prediction": {
@@ -242,15 +282,12 @@ class MLPredictor:
         }
 
     def _diagnose_failure(self, sensors: Dict[str, Any], pred_rul: float, risk_level: str) -> tuple[str, str]:
-        """
-        Diagnoses primary failing component and root cause actionable advice.
-        """
-        air_temp = float(sensors.get("airTemperature") or sensors.get("airTempKelvin") or 300.0)
-        proc_temp = float(sensors.get("processTemperature") or sensors.get("processTempKelvin") or 310.0)
-        speed = float(sensors.get("rotationalSpeed") or sensors.get("rotationalSpeedRpm") or 1500.0)
-        torque = float(sensors.get("torque") or sensors.get("torqueNm") or 40.0)
         tool_wear = float(sensors.get("toolWear") or sensors.get("toolWearMinutes") or 0.0)
+        torque = float(sensors.get("torque") or sensors.get("torqueNm") or 40.0)
         vibration = float(sensors.get("vibration") or sensors.get("vibrationMmS") or 1.8)
+        proc_temp = float(sensors.get("processTemperature") or sensors.get("processTempKelvin") or 310.0)
+        air_temp = float(sensors.get("airTemperature") or sensors.get("airTempKelvin") or 300.0)
+        speed = float(sensors.get("rotationalSpeed") or sensors.get("rotationalSpeedRpm") or 1500.0)
 
         temp_diff = proc_temp - air_temp
         power_watts = torque * (speed * (2 * np.pi / 60))

@@ -179,36 +179,59 @@ async function seedDatabase() {
     // 4. Insert Benchmark Model Evaluation Data
     console.log('[Seed] Inserting ML model evaluation benchmark results...');
     await ModelEvaluation.create({
-      modelName: 'Meridian XGBoost RUL Regressor & Failure Classifier',
-      modelVersion: 'meridian-xgb-v1.0',
-      dataset: 'NASA Turbofan Degradation Simulation (C-MAPSS FD001)',
+      modelName: 'Updated XGBoost Regressor (Updated_Models/xgb_regressor_FD001)',
+      modelVersion: 'meridian-updated-xgb-v2.0',
+      dataset: 'NASA Turbofan Degradation (C-MAPSS FD001 Cleaned)',
       taskType: 'binary_classification',
       metrics: {
-        accuracy: 0.941,
-        precision: 0.9231,
-        recall: 0.9600,
-        f1Score: 0.9412,
-        rocAuc: 0.9952
+        accuracy: 0.970,
+        precision: 1.000,
+        recall: 0.880,
+        f1Score: 0.9362,
+        rocAuc: 0.9973
       },
       sampleCount: 20631,
       failureModesEvaluated: [
         'High Pressure Compressor (HPC) Degradation',
         'Turbine Section (HPT / LPT) Thermal Wear',
-        'Fan & Low Pressure Compressor (LPC) Blade Erosion',
         'Combustor & Fuel Delivery Divergence'
       ],
       featureImportance: [
-        { feature: 's_4_roll_mean_5 (T50 Exhaust Gas Temp)', importance: 0.3871 },
-        { feature: 's_3_roll_mean_15 (T30 HPC Outlet Temp)', importance: 0.1632 },
-        { feature: 's_11_roll_mean_5 (Ps30 HPC Static Pressure)', importance: 0.1085 },
-        { feature: 's_15_roll_mean_5 (BPR Bypass Ratio)', importance: 0.0536 },
-        { feature: 's_11_drift (HPC Static Pressure Drift)', importance: 0.0464 },
-        { feature: 's_2_roll_mean_15 (T24 LPC Outlet Temp)', importance: 0.0227 },
-        { feature: 's_15_roll_mean_15 (BPR Long-Term Trend)', importance: 0.0211 },
-        { feature: 's_4_drift (T50 Exhaust Temp Drift)', importance: 0.0180 }
+        { feature: 's_4_rm5 (T50 Exhaust Gas Temp)', importance: 0.392 },
+        { feature: 's_3_rm15 (T30 HPC Outlet Temp)', importance: 0.168 },
+        { feature: 's_11_rm5 (Ps30 HPC Static Pressure)', importance: 0.112 },
+        { feature: 's_15_rm5 (BPR Bypass Ratio)', importance: 0.054 },
+        { feature: 's_11_drift (HPC Static Pressure Drift)', importance: 0.048 },
+        { feature: 's_2_rm15 (T24 LPC Outlet Temp)', importance: 0.024 }
       ],
-      evaluatedAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000),
-      notes: 'Trained on run-to-failure trajectories of 100 turbofans. Validated on held-out NASA test set: R2 = 0.9123, RMSE = 12.3 cycles, MAE = 9.04 cycles, NASA PHM score = 194.2.'
+      evaluatedAt: new Date(Date.now() - 1 * 60 * 60 * 1000),
+      notes: 'Trained on cleaned C-MAPSS dataset. R2 = 0.9093, RMSE = 12.51 cycles, MAE = 9.29 cycles, NASA Score = 198.1.'
+    });
+
+    await ModelEvaluation.create({
+      modelName: 'Updated Random Forest Regressor (Updated_Models/rf_regressor_FD001)',
+      modelVersion: 'meridian-updated-rf-v2.0',
+      dataset: 'NASA Turbofan Degradation (C-MAPSS FD001 Cleaned)',
+      taskType: 'binary_classification',
+      metrics: {
+        accuracy: 0.950,
+        precision: 0.952,
+        recall: 0.800,
+        f1Score: 0.870,
+        rocAuc: 0.985
+      },
+      sampleCount: 20631,
+      failureModesEvaluated: [
+        'High Pressure Compressor (HPC) Degradation',
+        'Turbine Section Thermal Wear'
+      ],
+      featureImportance: [
+        { feature: 's_4_rm5 (T50 Exhaust Gas Temp)', importance: 0.345 },
+        { feature: 's_3_rm15 (T30 HPC Outlet Temp)', importance: 0.182 },
+        { feature: 's_11_rm5 (Ps30 HPC Static Pressure)', importance: 0.125 }
+      ],
+      evaluatedAt: new Date(Date.now() - 1 * 60 * 60 * 1000),
+      notes: 'Trained with 100 trees, max_depth=12. R2 = 0.8952, RMSE = 13.45 cycles, MAE = 10.00 cycles, NASA Score = 250.1.'
     });
 
     await ModelEvaluation.create({

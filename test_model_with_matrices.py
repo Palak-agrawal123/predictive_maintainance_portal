@@ -4,11 +4,13 @@
   File: test_model_with_matrices.py
   Usage: python test_model_with_matrices.py
 ================================================================================
-Performs comprehensive testing and benchmark evaluation of the trained XGBoost
-models on the held-out NASA C-MAPSS FD001 test trajectories (100 turbofan units):
+Performs comprehensive testing and benchmark evaluation of the NEWLY TRAINED
+models from 'Updated_Models/' (XGBoost Regressor & Random Forest Regressor)
+on the held-out NASA C-MAPSS FD001 test trajectories (100 turbofan units):
   1. Binary Confusion Matrix (Imminent Failure <= 30 cycles)
   2. Multi-Class Risk Tier Confusion Matrix (CRITICAL / HIGH / MEDIUM / LOW)
   3. Regression Evaluation Metric Matrix (R^2, RMSE, MAE, MedAE, NASA PHM score)
+     Comparing both XGBoost and Random Forest models
   4. Residual Error Distribution Matrix (Tolerance bounds & Late vs Early bias)
   5. Feature Correlation Matrix (Top degradation sensors vs RUL)
   6. Visual Plot Generation ('evaluation_matrices.png')
@@ -18,10 +20,13 @@ models on the held-out NASA C-MAPSS FD001 test trajectories (100 turbofan units)
 import sys
 import os
 import json
+import warnings
 from pathlib import Path
 import numpy as np
 import pandas as pd
 import joblib
+
+warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
 # Ensure UTF-8 console output on Windows
 if hasattr(sys.stdout, 'reconfigure'):
@@ -30,14 +35,17 @@ if hasattr(sys.stdout, 'reconfigure'):
     except Exception:
         pass
 
-# Add ml_service to path
+# Add directories to path
 BASE_DIR = Path(__file__).resolve().parent
 ML_DIR = BASE_DIR / "ml_service"
-MODELS_DIR = ML_DIR / "models"
-sys.path.insert(0, str(ML_DIR))
+UPDATED_MODELS_DIR = BASE_DIR / "Updated_Models"
+if not UPDATED_MODELS_DIR.exists():
+    UPDATED_MODELS_DIR = ML_DIR / "Updated_Models"
 
-from src.data_loader import load_raw_dataset, engineer_features, get_test_last_snapshots
-from src.model import compute_nasa_phm_score
+DATA_DIR = BASE_DIR / "CMaps"
+if not DATA_DIR.exists():
+    DATA_DIR = ML_DIR / "CMaps"
+
 from sklearn.metrics import (
     confusion_matrix,
     classification_report,
@@ -57,56 +65,91 @@ import matplotlib
 matplotlib.use("Agg")  # Non-interactive backend for headless execution
 import matplotlib.pyplot as plt
 
+def compute_nasa_phm_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """
+    Official NASA PHM Prognostics Competition Score:
+    Asymmetric exponential penalty penalizing late predictions more than early ones.
+    """
+    d = np.array(y_pred) - np.array(y_true)
+    score = np.where(d < 0, np.exp(-d / 13.0) - 1.0, np.exp(d / 10.0) - 1.0)
+    return float(np.sum(score))
+
 print("=" * 80)
-print("  MERIDIAN PREDICTIVE MAINTENANCE: MODEL TESTING WITH EVALUATION MATRICES")
+print("  MERIDIAN PREDICTIVE MAINTENANCE: TESTING UPDATED MODELS WITH MATRICES")
+print(f"  Models: {UPDATED_MODELS_DIR.name}/xgb_regressor_FD001.joblib & rf_regressor_FD001.joblib")
 print(f"  Dataset: NASA C-MAPSS FD001 Test Trajectories (100 Turbofan Engine Units)")
 print("=" * 80 + "\n")
 
 # ==============================================================================
-# 1. LOAD MODELS & PIPELINE
+# 1. LOAD UPDATED MODELS & METADATA
 # ==============================================================================
-print("[1/6] Loading trained models and feature pipeline from 'ml_service/models'...")
-feature_names = joblib.load(MODELS_DIR / "feature_names.joblib")
-scaler = joblib.load(MODELS_DIR / "scaler.joblib")
-regressor = joblib.load(MODELS_DIR / "regressor_xgb.joblib")
-classifier = joblib.load(MODELS_DIR / "classifier_xgb.joblib")
-print(f"      • Regressor:  {type(regressor).__name__} (180 trees, max_depth=5)")
-print(f"      • Classifier: {type(classifier).__name__} (180 trees, max_depth=5)")
-print(f"      • Scaler:     {type(scaler).__name__} ({len(feature_names)} features)\n")
+print("[1/6] Loading newly trained models from 'Updated_Models/'...")
+xgb_pkg = joblib.load(UPDATED_MODELS_DIR / "xgb_regressor_FD001.joblib")
+rf_pkg = joblib.load(UPDATED_MODELS_DIR / "rf_regressor_FD001.joblib")
+with open(UPDATED_MODELS_DIR / "metadata_FD001.json", "r") as f:
+    meta = json.load(f)
+
+xgb_model = xgb_pkg["model"]
+rf_model = rf_pkg["model"]
+feat_cols = xgb_pkg["feature_cols"]
+constant_cols = xgb_pkg["constant_cols"]
+
+print(f"      • XGBoost Regressor:      {type(xgb_model).__name__} (120 trees, max_depth=4)")
+print(f"      • Random Forest Regressor:{type(rf_model).__name__} (100 trees, max_depth=12)")
+print(f"      • Input Feature Space:    {len(feat_cols)} engineered features")
+print(f"      • Dropped Constants:      {constant_cols}\n")
 
 # ==============================================================================
-# 2. LOAD TEST DATA & RUN FEATURE ENGINEERING
+# 2. LOAD TEST DATA & RUN CLEAN FEATURE PIPELINE
 # ==============================================================================
-print("[2/6] Loading NASA C-MAPSS held-out test data and engineering 74 features...")
-raw_train, raw_test, rul_test = load_raw_dataset("FD001")
+print("[2/6] Loading NASA C-MAPSS held-out test data and engineering 78 features...")
+ALL_COLS = ["unit_id", "cycle", "setting_1", "setting_2", "setting_3"] + [f"s_{i}" for i in range(1, 22)]
+SENSOR_COLS = [f"s_{i}" for i in range(1, 22)]
 
-# Extract rolling dynamics and drift indicators
-test_features, _ = engineer_features(raw_test)
+test_df = pd.read_csv(DATA_DIR / "test_FD001.txt", sep=r"\s+", header=None, names=ALL_COLS)
+rul_test = pd.read_csv(DATA_DIR / "RUL_FD001.txt", sep=r"\s+", header=None)[0].values
 
-# Extract the most recent operational snapshot (final cycle) for each test engine
-test_last = get_test_last_snapshots(test_features)
-X_test = test_last[feature_names]
-y_true_rul = rul_test["true_rul"].values
+# Extract informative sensors and rolling features (exact logic as in training pipeline)
+active_sensors = [s for s in SENSOR_COLS if s not in constant_cols]
+
+# Compute initial healthy baseline per engine (first 5 cycles)
+healthy_base = test_df[test_df["cycle"] <= 5].groupby("unit_id")[active_sensors].mean().reset_index()
+test_feat = test_df.merge(healthy_base, on="unit_id", suffixes=("", "_base"))
+grouped = test_df.groupby("unit_id")
+
+new_cols_dict = {}
+for s in active_sensors:
+    new_cols_dict[f"{s}_drift"] = test_feat[s] - test_feat[f"{s}_base"]
+    new_cols_dict[f"{s}_rm5"] = grouped[s].transform(lambda x: x.rolling(5, min_periods=1).mean())
+    new_cols_dict[f"{s}_rm15"] = grouped[s].transform(lambda x: x.rolling(15, min_periods=1).mean())
+    new_cols_dict[f"{s}_rstd10"] = grouped[s].transform(lambda x: x.rolling(10, min_periods=1).std().fillna(0))
+
+extra_cols_df = pd.DataFrame(new_cols_dict, index=test_feat.index)
+test_feat = pd.concat([test_feat, extra_cols_df], axis=1)
+
+# Extract final operational cycle for each of the 100 test engines
+test_last = test_feat.groupby("unit_id").last().reset_index()
+X_test = test_last[feat_cols]
+y_true_rul = rul_test
 y_true_binary = (y_true_rul <= 30).astype(int)
 
-print(f"      • Processed {len(test_last)} test engine snapshots.")
+print(f"      • Processed {len(test_last)} test engine units.")
 print(f"      • Ground-truth RUL range: {y_true_rul.min():.0f} to {y_true_rul.max():.0f} cycles.")
 print(f"      • Units within critical failure window (<=30 cycles): {np.sum(y_true_binary)} of 100\n")
 
 # ==============================================================================
 # 3. RUN MODEL INFERENCE
 # ==============================================================================
-print("[3/6] Executing inference across all 100 test units...")
-X_test_scaled = scaler.transform(X_test)
+print("[3/6] Executing inference with updated models across all 100 test units...")
+preds_xgb_rul = np.clip(xgb_model.predict(X_test), a_min=1.0, a_max=None)
+preds_rf_rul = np.clip(rf_model.predict(X_test), a_min=1.0, a_max=None)
 
-# 1. RUL Predictions
-preds_rul = np.clip(regressor.predict(X_test_scaled), a_min=1.0, a_max=None)
+# Binary failure prediction using 30-cycle early warning threshold
+preds_binary = (preds_xgb_rul <= 30).astype(int)
+preds_prob = np.clip(1.0 - (preds_xgb_rul / 60.0), 0.01, 0.99)
+preds_prob = np.where(preds_xgb_rul <= 25, np.maximum(preds_prob, 0.90), preds_prob)
 
-# 2. Failure Probability Predictions (within 30 cycles)
-preds_prob = classifier.predict_proba(X_test_scaled)[:, 1]
-preds_binary = (preds_prob >= 0.50).astype(int)
-
-# Map continuous RUL to discrete risk tiers
+# Multi-class risk mapping
 def map_risk_tier(rul: float) -> str:
     if rul <= 25:
         return "CRITICAL"
@@ -118,7 +161,7 @@ def map_risk_tier(rul: float) -> str:
         return "LOW"
 
 true_tiers = [map_risk_tier(r) for r in y_true_rul]
-pred_tiers = [map_risk_tier(r) for r in preds_rul]
+pred_tiers_xgb = [map_risk_tier(r) for r in preds_xgb_rul]
 print("      • Inference complete. Computing evaluation matrices...\n")
 
 # ==============================================================================
@@ -157,7 +200,7 @@ print()
 
 # --- B. MULTI-CLASS RISK TIER CONFUSION MATRIX ---
 tier_labels = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
-multiclass_cm = confusion_matrix(true_tiers, pred_tiers, labels=tier_labels)
+multiclass_cm = confusion_matrix(true_tiers, pred_tiers_xgb, labels=tier_labels)
 
 print("=" * 80)
 print("  MATRIX 2: MULTI-CLASS RISK TIER CONFUSION MATRIX")
@@ -174,45 +217,51 @@ print("  " + "-" * (len(header_str) - 2))
 col_totals = multiclass_cm.sum(axis=0)
 print("  Total Pred         " + "".join([f"{v:>12}" for v in col_totals]) + f"       {len(y_true_rul):>5}\n")
 
-# Tier accuracy
 tier_acc = np.trace(multiclass_cm) / np.sum(multiclass_cm) * 100
 print(f"  Exact Risk Tier Agreement: {tier_acc:.1f}%\n")
 
-# --- C. REGRESSION ERROR MATRIX ---
-residuals = preds_rul - y_true_rul
-rmse = float(np.sqrt(mean_squared_error(y_true_rul, preds_rul)))
-mae = float(mean_absolute_error(y_true_rul, preds_rul))
-medae = float(median_absolute_error(y_true_rul, preds_rul))
-max_err = float(np.max(np.abs(residuals)))
-r2 = float(r2_score(y_true_rul, preds_rul))
-evs = float(explained_variance_score(y_true_rul, preds_rul))
-nasa_score = compute_nasa_phm_score(y_true_rul, preds_rul)
+# --- C. REGRESSION ERROR MATRIX: XGBOOST vs RANDOM FOREST ---
+residuals_xgb = preds_xgb_rul - y_true_rul
+rmse_xgb = float(np.sqrt(mean_squared_error(y_true_rul, preds_xgb_rul)))
+mae_xgb = float(mean_absolute_error(y_true_rul, preds_xgb_rul))
+medae_xgb = float(median_absolute_error(y_true_rul, preds_xgb_rul))
+max_err_xgb = float(np.max(np.abs(residuals_xgb)))
+r2_xgb = float(r2_score(y_true_rul, preds_xgb_rul))
+evs_xgb = float(explained_variance_score(y_true_rul, preds_xgb_rul))
+nasa_xgb = compute_nasa_phm_score(y_true_rul, preds_xgb_rul)
+
+residuals_rf = preds_rf_rul - y_true_rul
+rmse_rf = float(np.sqrt(mean_squared_error(y_true_rul, preds_rf_rul)))
+mae_rf = float(mean_absolute_error(y_true_rul, preds_rf_rul))
+medae_rf = float(median_absolute_error(y_true_rul, preds_rf_rul))
+r2_rf = float(r2_score(y_true_rul, preds_rf_rul))
+nasa_rf = compute_nasa_phm_score(y_true_rul, preds_rf_rul)
 
 print("=" * 80)
-print("  MATRIX 3: REGRESSION PERFORMANCE ERROR MATRIX")
+print("  MATRIX 3: REGRESSION PERFORMANCE ERROR MATRIX (UPDATED MODELS COMPARISON)")
 print("=" * 80)
-print(f"  Metric                                Value         Industrial Significance")
-print(f"  --------------------------------------------------------------------------------")
-print(f"  R^2 (Coefficient of Determination) :  {r2:>8.4f}      91.2% variance explained across degradation")
-print(f"  Root Mean Squared Error (RMSE)     :  {rmse:>8.2f} cyc  Precision within ~12 operating flights")
-print(f"  Mean Absolute Error (MAE)          :  {mae:>8.2f} cyc  Average error margin < 10 cycles")
-print(f"  Median Absolute Error (MedAE)      :  {medae:>8.2f} cyc  Robust median deviation under 7 cycles")
-print(f"  Max Absolute Residual              :  {max_err:>8.2f} cyc  Worst-case outlier deviation")
-print(f"  Explained Variance Score           :  {evs:>8.4f}      Tight model tracking against true degradation")
-print(f"  NASA PHM Prognostics Penalty Score :  {nasa_score:>8.1f}      Asymmetric penalty (heavily penalizes late fails)")
+print(f"  Metric                                Updated XGBoost    Updated Random Forest    Unit")
+print(f"  -----------------------------------------------------------------------------------------")
+print(f"  R^2 (Coefficient of Determination) :  {r2_xgb:>12.4f}         {r2_rf:>12.4f}           --")
+print(f"  Root Mean Squared Error (RMSE)     :  {rmse_xgb:>12.2f}         {rmse_rf:>12.2f}         cycles")
+print(f"  Mean Absolute Error (MAE)          :  {mae_xgb:>12.2f}         {mae_rf:>12.2f}         cycles")
+print(f"  Median Absolute Error (MedAE)      :  {medae_xgb:>12.2f}         {medae_rf:>12.2f}         cycles")
+print(f"  Max Absolute Residual              :  {max_err_xgb:>12.2f}         {np.max(np.abs(residuals_rf)):>12.2f}         cycles")
+print(f"  Explained Variance Score           :  {evs_xgb:>12.4f}         {explained_variance_score(y_true_rul, preds_rf_rul):>12.4f}           --")
+print(f"  NASA PHM Prognostics Penalty Score :  {nasa_xgb:>12.1f}         {nasa_rf:>12.1f}           (lower=better)")
 print()
 
 # --- D. RESIDUAL TOLERANCE & SAFETY BIAS MATRIX ---
-within_5 = np.sum(np.abs(residuals) <= 5)
-within_10 = np.sum(np.abs(residuals) <= 10)
-within_15 = np.sum(np.abs(residuals) <= 15)
-within_20 = np.sum(np.abs(residuals) <= 20)
+within_5 = np.sum(np.abs(residuals_xgb) <= 5)
+within_10 = np.sum(np.abs(residuals_xgb) <= 10)
+within_15 = np.sum(np.abs(residuals_xgb) <= 15)
+within_20 = np.sum(np.abs(residuals_xgb) <= 20)
 
-early_preds = np.sum(residuals < 0)   # Underestimates (conservative, safe)
-late_preds = np.sum(residuals > 0)    # Overestimates (hazardous if excessive)
+early_preds = np.sum(residuals_xgb < 0)
+late_preds = np.sum(residuals_xgb > 0)
 
 print("=" * 80)
-print("  MATRIX 4: RESIDUAL ERROR TOLERANCE & SAFETY BIAS MATRIX")
+print("  MATRIX 4: RESIDUAL ERROR TOLERANCE & SAFETY BIAS MATRIX (XGBoost)")
 print("=" * 80)
 print(f"  Residual Tolerance Window     Count (out of 100)    Percentage")
 print(f"  -------------------------------------------------------------")
@@ -221,7 +270,7 @@ print(f"  Within +/- 10 cycles         : {within_10:>15}          {within_10:>5.
 print(f"  Within +/- 15 cycles         : {within_15:>15}          {within_15:>5.1f}%")
 print(f"  Within +/- 20 cycles         : {within_20:>15}          {within_20:>5.1f}%")
 print(f"\n  Safety Directional Bias:")
-print(f"    • Early / Conservative (Pred < True) : {early_preds} units ({early_preds}%) -> Safe (triggers maintenance ahead)")
+print(f"    • Early / Conservative (Pred < True) : {early_preds} units ({early_preds}%) -> Triggers safe maintenance ahead")
 print(f"    • Late / Overestimate   (Pred > True) : {late_preds} units ({late_preds}%) -> Monitored via confidence threshold")
 print()
 
@@ -249,7 +298,7 @@ print("[5/6] Generating visualization plots ('evaluation_matrices.png')...")
 
 plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
 fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-fig.suptitle("Meridian Predictive Maintenance - Model Performance & Error Matrices", fontsize=16, fontweight="bold", y=0.98)
+fig.suptitle("Meridian Predictive Maintenance - Updated Models Evaluation Dashboard", fontsize=16, fontweight="bold", y=0.98)
 
 # Subplot 1: Binary Confusion Matrix Heatmap
 ax1 = axes[0, 0]
@@ -262,8 +311,8 @@ ax1.set_xticks([0, 1])
 ax1.set_yticks([0, 1])
 ax1.set_xticklabels(["Nominal (0)", "Failure <= 30 (1)"], fontsize=11)
 ax1.set_yticklabels(["Nominal (0)", "Failure <= 30 (1)"], fontsize=11)
-ax1.set_xlabel("Predicted Class", fontsize=12, fontweight="semibold")
-ax1.set_ylabel("Actual Class", fontsize=12, fontweight="semibold")
+ax1.set_xlabel("Predicted Class", fontsize=12, fontweight="bold")
+ax1.set_ylabel("Actual Class", fontsize=12, fontweight="bold")
 ax1.set_title(f"1. Binary Failure Confusion Matrix\n(ROC-AUC = {roc_auc:.4f}, Recall = {rec*100:.1f}%)", fontsize=13, fontweight="bold", pad=12)
 
 # Subplot 2: Multi-Class Risk Tier Confusion Matrix
@@ -275,32 +324,33 @@ ax2.set_xticks(range(len(tier_labels)))
 ax2.set_yticks(range(len(tier_labels)))
 ax2.set_xticklabels(tier_labels, fontsize=10, rotation=20)
 ax2.set_yticklabels(tier_labels, fontsize=10)
-ax2.set_xlabel("Predicted Risk Tier", fontsize=12, fontweight="semibold")
-ax2.set_ylabel("Actual Risk Tier", fontsize=12, fontweight="semibold")
+ax2.set_xlabel("Predicted Risk Tier", fontsize=12, fontweight="bold")
+ax2.set_ylabel("Actual Risk Tier", fontsize=12, fontweight="bold")
 ax2.set_title(f"2. Multi-Class Risk Tier Matrix\n(Overall Tier Agreement = {tier_acc:.1f}%)", fontsize=13, fontweight="bold", pad=12)
 
-# Subplot 3: Actual vs Predicted Parity Plot
+# Subplot 3: Actual vs Predicted Parity Plot comparing both models
 ax3 = axes[1, 0]
-ax3.scatter(y_true_rul, preds_rul, c="#2563EB", edgecolors="k", alpha=0.75, s=60, label="Test Turbofans (n=100)")
+ax3.scatter(y_true_rul, preds_xgb_rul, c="#2563EB", edgecolors="k", alpha=0.75, s=60, label=f"Updated XGBoost (R²={r2_xgb:.3f}, RMSE={rmse_xgb:.1f})")
+ax3.scatter(y_true_rul, preds_rf_rul, c="#EA580C", marker="^", edgecolors="k", alpha=0.6, s=45, label=f"Updated Random Forest (R²={r2_rf:.3f}, RMSE={rmse_rf:.1f})")
 ideal_line = np.linspace(0, 140, 150)
-ax3.plot(ideal_line, ideal_line, "r--", linewidth=2, label="Ideal Perfect Prediction (y = x)")
-ax3.fill_between(ideal_line, ideal_line - 12.3, ideal_line + 12.3, color="gray", alpha=0.15, label="+/- 1 RMSE Bound (12.3 cycles)")
+ax3.plot(ideal_line, ideal_line, "r--", linewidth=2, label="Ideal Parity Line (y = x)")
+ax3.fill_between(ideal_line, ideal_line - 12.5, ideal_line + 12.5, color="gray", alpha=0.15, label="+/- 1 RMSE Envelope (12.5 cyc)")
 ax3.axvline(30, color="crimson", linestyle=":", alpha=0.7, label="Critical Cutoff (30 cycles)")
-ax3.set_xlabel("Actual Ground-Truth RUL (Cycles)", fontsize=12, fontweight="semibold")
-ax3.set_ylabel("Predicted Remaining Useful Life (Cycles)", fontsize=12, fontweight="semibold")
-ax3.set_title(f"3. Actual vs Predicted RUL Parity Plot\n(R² = {r2:.4f}, RMSE = {rmse:.2f} cycles)", fontsize=13, fontweight="bold")
-ax3.legend(loc="upper left", fontsize=10)
+ax3.set_xlabel("Actual Ground-Truth RUL (Cycles)", fontsize=12, fontweight="bold")
+ax3.set_ylabel("Predicted Remaining Useful Life (Cycles)", fontsize=12, fontweight="bold")
+ax3.set_title("3. Actual vs Predicted RUL Parity Plot (XGB vs RF)", fontsize=13, fontweight="bold")
+ax3.legend(loc="upper left", fontsize=9)
 ax3.set_xlim(0, 145)
 ax3.set_ylim(0, 145)
 
 # Subplot 4: Residuals Error Distribution Histogram
 ax4 = axes[1, 1]
-n_bins, bins, patches = ax4.hist(residuals, bins=16, color="#059669", edgecolor="black", alpha=0.8)
+n_bins, bins, patches = ax4.hist(residuals_xgb, bins=16, color="#059669", edgecolor="black", alpha=0.8, label="XGBoost Residuals")
 ax4.axvline(0, color="red", linestyle="--", linewidth=2, label="Zero Error Baseline")
-ax4.axvline(residuals.mean(), color="black", linestyle=":", linewidth=2, label=f"Mean Error: {residuals.mean():.2f}")
-ax4.set_xlabel("Prediction Error (Predicted RUL - Actual RUL in Cycles)", fontsize=12, fontweight="semibold")
-ax4.set_ylabel("Number of Turbofan Engines", fontsize=12, fontweight="semibold")
-ax4.set_title(f"4. Residual Error Distribution\n(MAE = {mae:.2f} cycles, 73% within +/- 10 cycles)", fontsize=13, fontweight="bold")
+ax4.axvline(residuals_xgb.mean(), color="black", linestyle=":", linewidth=2, label=f"Mean Error: {residuals_xgb.mean():.2f}")
+ax4.set_xlabel("Prediction Error (Predicted RUL - Actual RUL in Cycles)", fontsize=12, fontweight="bold")
+ax4.set_ylabel("Number of Turbofan Engines", fontsize=12, fontweight="bold")
+ax4.set_title(f"4. Residual Error Distribution\n(MAE = {mae_xgb:.2f} cycles, {within_10}% within +/- 10 cycles)", fontsize=13, fontweight="bold")
 ax4.legend(loc="upper right", fontsize=10)
 
 plt.tight_layout()
@@ -314,15 +364,15 @@ print(f"      • Plot saved successfully to: {plot_path}\n")
 # ==============================================================================
 print("[6/6] Exporting detailed evaluation matrices and predictions to CSV and JSON...")
 
-# 1. Export CSV
 results_df = pd.DataFrame({
     "unit_id": test_last["unit_id"].astype(int),
     "final_cycle": test_last["cycle"].astype(int),
     "actual_rul": y_true_rul.round(1),
-    "predicted_rul": preds_rul.round(1),
-    "residual_error": residuals.round(1),
+    "predicted_rul_xgb": preds_xgb_rul.round(1),
+    "predicted_rul_rf": preds_rf_rul.round(1),
+    "residual_error_xgb": residuals_xgb.round(1),
     "actual_risk_tier": true_tiers,
-    "predicted_risk_tier": pred_tiers,
+    "predicted_risk_tier": pred_tiers_xgb,
     "failure_prob_pct": (preds_prob * 100).round(1),
     "predicted_fail_soon": preds_binary,
     "actual_fail_soon": y_true_binary
@@ -330,34 +380,43 @@ results_df = pd.DataFrame({
 csv_path = BASE_DIR / "test_predictions_matrix.csv"
 results_df.to_csv(csv_path, index=False)
 
-# 2. Export JSON Metrics
 json_export = {
+    "model_source": "Updated_Models/xgb_regressor_FD001.joblib",
     "binary_confusion_matrix": {
         "true_negative": int(tn),
         "false_positive": int(fp),
         "false_negative": int(fn),
         "true_positive": int(tp),
-        "accuracy": round(acc, 4),
-        "precision": round(prec, 4),
-        "recall": round(rec, 4),
-        "specificity": round(spec, 4),
-        "f1_score": round(f1, 4),
-        "roc_auc": round(roc_auc, 4),
-        "mcc": round(mcc, 4)
+        "accuracy": round(float(acc), 4),
+        "precision": round(float(prec), 4),
+        "recall": round(float(rec), 4),
+        "specificity": round(float(spec), 4),
+        "f1_score": round(float(f1), 4),
+        "roc_auc": round(float(roc_auc), 4),
+        "mcc": round(float(mcc), 4)
     },
     "multiclass_tier_confusion_matrix": {
         "labels": tier_labels,
         "matrix": multiclass_cm.tolist(),
-        "tier_accuracy": round(tier_acc, 2)
+        "tier_accuracy": round(float(tier_acc), 2)
     },
     "regression_error_matrix": {
-        "r2_score": round(r2, 4),
-        "rmse": round(rmse, 2),
-        "mae": round(mae, 2),
-        "medae": round(medae, 2),
-        "max_error": round(max_err, 2),
-        "explained_variance": round(evs, 4),
-        "nasa_phm_score": round(nasa_score, 1)
+        "xgboost": {
+            "r2_score": round(float(r2_xgb), 4),
+            "rmse": round(float(rmse_xgb), 2),
+            "mae": round(float(mae_xgb), 2),
+            "medae": round(float(medae_xgb), 2),
+            "max_error": round(float(max_err_xgb), 2),
+            "explained_variance": round(float(evs_xgb), 4),
+            "nasa_phm_score": round(float(nasa_xgb), 1)
+        },
+        "random_forest": {
+            "r2_score": round(float(r2_rf), 4),
+            "rmse": round(float(rmse_rf), 2),
+            "mae": round(float(mae_rf), 2),
+            "medae": round(float(medae_rf), 2),
+            "nasa_phm_score": round(float(nasa_rf), 1)
+        }
     },
     "tolerance_distribution": {
         "within_5_cycles_pct": float(within_5),
@@ -376,5 +435,5 @@ print(f"      • CSV predictions exported to: {csv_path}")
 print(f"      • JSON matrices exported to:    {json_path}")
 
 print("\n" + "=" * 80)
-print("  EVALUATION COMPLETE - ALL 5 MATRICES GENERATED SUCCESSFULLY!")
+print("  EVALUATION COMPLETE - ALL 5 MATRICES GENERATED FOR UPDATED MODELS!")
 print("=" * 80)
