@@ -1,0 +1,10 @@
+{
+    "rmse": 12.3,
+    "mae": 9.04,
+    "r2_score": 0.9123,
+    "nasa_phm_score": 194.2,
+    "roc_auc": 0.9952,
+    "f1_score": 0.9412,
+    "precision": 0.9231,
+    "recall": 0.96
+}
