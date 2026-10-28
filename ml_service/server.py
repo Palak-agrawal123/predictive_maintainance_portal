@@ -1,16 +1,15 @@
 """
 FastAPI Microservice for Predictive Maintenance ML Models
-Exposes endpoints for failure risk prediction, remaining useful life (RUL) regression,
-model benchmark metrics, and fleet diagnostics.
+Serves the newly trained multi-dataset models (XGBoost Regressor, Random Forest, PyTorch checkpoints)
+from Updated_Models/ with multi-subset benchmark metrics and fleet diagnostics.
 """
 import sys
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
-# Ensure current directory is on path
 CURRENT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(CURRENT_DIR))
 
@@ -18,11 +17,10 @@ from predictor import predictor
 
 app = FastAPI(
     title="Predictive Maintenance ML Microservice",
-    description="FastAPI service serving XGBoost RUL Regressor and Failure Classifier models",
-    version="1.0.0"
+    description="FastAPI microservice serving newly trained XGBoost & Random Forest RUL models (ml_service/models)",
+    version="2.0.0"
 )
 
-# Enable CORS for cross-origin requests
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -36,20 +34,17 @@ class PredictRequest(BaseModel):
     sensors: Dict[str, Any] = Field(default_factory=dict)
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 @app.get("/")
 def get_service_info():
-    """
-    Root endpoint queried by Express mlService.checkHealth()
-    """
     return {
         "status": "online",
         "service": "predictive-maintenance-ml-microservice",
-        "version": "1.0.0",
-        "modelName": "XGBoost RUL Regressor & 30-Cycle Failure Classifier",
-        "dataset": "NASA Turbofan Degradation (C-MAPSS FD001) & Industrial Telemetry",
+        "version": "2.0.0",
+        "activeModel": "XGBoost Regressor (models/xgb_regressor_FD001.joblib)",
+        "alternativeModel": "Random Forest Regressor (models/rf_regressor_FD001.joblib)",
+        "dataset": "NASA Turbofan C-MAPSS (FD001-FD004) & Industrial Telemetry",
         "featuresCount": len(predictor.feature_names),
         "benchmarkMetrics": predictor.metrics,
         "fleetSummary": predictor.summary_stats
@@ -57,39 +52,35 @@ def get_service_info():
 
 @app.get("/health")
 def healthcheck():
-    """
-    Healthcheck endpoint confirming model is loaded and ready
-    """
     return {
         "status": "healthy",
         "modelLoaded": predictor.is_loaded,
+        "modelVersion": predictor.model_version,
         "featuresCount": len(predictor.feature_names),
         "models": {
-            "regressor": "regressor_xgb.joblib",
-            "classifier": "classifier_xgb.joblib",
-            "scaler": "scaler.joblib"
+            "xgb_regressor": "models/xgb_regressor_FD001.joblib",
+            "rf_regressor": "models/rf_regressor_FD001.joblib"
         }
     }
 
 @app.get("/metrics")
 def get_metrics():
-    """
-    Returns official benchmark evaluation metrics (R2, RMSE, MAE, NASA PHM score, ROC-AUC)
-    """
     return {
         "success": True,
-        "dataset": "NASA C-MAPSS FD001 Benchmark Set",
-        "metrics": predictor.metrics
+        "dataset": "NASA C-MAPSS Benchmark Suite",
+        "active_subset": "FD001",
+        "metrics": predictor.metrics,
+        "all_subsets": getattr(predictor, "all_subsets_summary", {})
     }
 
-@app.get("/feature-importance")
-def get_feature_importance():
+@app.get("/subsets")
+def get_subsets_summary():
     """
-    Returns feature importance ranking of the trained XGBoost model
+    Returns the complete 4-dataset benchmark summary (FD001, FD002, FD003, FD004)
     """
     return {
         "success": True,
-        "features": predictor.feature_importance
+        "data": getattr(predictor, "all_subsets_summary", {})
     }
 
 @app.get("/fleet-predictions")
@@ -97,9 +88,6 @@ def get_fleet_predictions(
     risk_tier: Optional[str] = Query(None, description="Filter by risk tier: CRITICAL, HIGH, MEDIUM, LOW"),
     limit: int = Query(50, ge=1, le=100)
 ):
-    """
-    Returns precomputed fleet risk profiles and component diagnoses
-    """
     all_units = list(predictor.fleet_predictions.values())
     if risk_tier:
         all_units = [u for u in all_units if u.get("risk_tier", "").upper() == risk_tier.upper()]
@@ -113,9 +101,6 @@ def get_fleet_predictions(
 
 @app.post("/predict")
 def predict(payload: PredictRequest):
-    """
-    Predicts machine failure risk, remaining useful life, health score, and component diagnostics.
-    """
     machine_id = payload.machine_id or "MCH-GENERIC"
     sensors = payload.sensors or {}
     metadata = payload.metadata or {}
